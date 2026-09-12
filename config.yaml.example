@@ -253,9 +253,9 @@ gain:
   gain_type: 1                # 奖励类型：1=无限卡（默认），2=书币（环境变量 GAIN_TYPE）
   refresh_token: ""           # 应用端 RefreshToken（环境变量 GAIN_REFRESH_TOKEN）
   device_id: ""               # 与 RefreshToken 配对的 DeviceId（环境变量 GAIN_DEVICE_ID）
-  # 上面两个字段也可以用单个环境变量 GAIN_ACCOUNT 一次提供：把
-  # account.json 的内容（JSON）原样粘贴进去即可，格式如
-  # {"Vid":123,"RefreshToken":"...","DeviceId":"..."}
+  # 上面两个字段也可以用单个环境变量 GAIN_ACCOUNT 一次提供（JSON），
+  # 只需这两个字段即可：
+  # {"RefreshToken":"...","DeviceId":"..."}
 
 # 定时任务配置（仅在 startup_mode 为 scheduled 时生效）
 schedule:
