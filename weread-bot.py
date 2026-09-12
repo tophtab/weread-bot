@@ -1008,6 +1008,54 @@ def validate_config_semantics(config: WeReadConfig) -> None:
                 )
 
 
+def _parse_gain_account(raw: str) -> Dict[str, str]:
+    """解析 GAIN_ACCOUNT 凭证串，返回统一小写键名的字典。
+
+    支持两种格式（键名大小写/下划线不敏感）：
+      键值格式:  RefreshToken=xxx; DeviceId=yyy
+      JSON 格式: {"RefreshToken": "xxx", "DeviceId": "yyy"}
+    """
+    text = raw.strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                raise ValueError("根节点必须是对象")
+        except (ValueError, TypeError) as exc:
+            raise _config_error(
+                "gain.account",
+                f"JSON 格式不合法（{exc}）",
+                "<gain.account>",
+            ) from exc
+        return {
+            str(key).replace("_", "").lower(): str(value)
+            for key, value in parsed.items()
+        }
+
+    normalized: Dict[str, str] = {}
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        if not sep:
+            raise _config_error(
+                "gain.account",
+                "键值格式应为 RefreshToken=xxx; DeviceId=yyy",
+                "<gain.account>",
+            )
+        normalized[key.strip().replace("_", "").lower()] = (
+            value.strip().strip("'\"")
+        )
+    if "refreshtoken" not in normalized and "deviceid" not in normalized:
+        raise _config_error(
+            "gain.account",
+            "至少需要提供 RefreshToken 与 DeviceId 之一",
+            "<gain.account>",
+        )
+    return normalized
+
+
 class ConfigManager:
     """配置管理器"""
 
@@ -1196,31 +1244,18 @@ class ConfigManager:
         gain_device_id = self._get_config_value(
             config_data, "gain.device_id", "GAIN_DEVICE_ID", ""
         )
-        # GAIN_ACCOUNT：单个环境变量提供整份凭证（JSON，与 WereadCheckin
-        # 的 account.json 同构），一次粘贴即可同时提供 RefreshToken 和 DeviceId
+        # GAIN_ACCOUNT：单个环境变量提供整份凭证，推荐键值格式
+        # （RefreshToken=xxx; DeviceId=yyy），兼容 JSON（account.json 同构）
         gain_account = self._get_config_value(
             config_data, "gain.account", "GAIN_ACCOUNT", ""
         )
         if gain_account:
-            try:
-                account_data = json.loads(gain_account)
-                if not isinstance(account_data, dict):
-                    raise ValueError("根节点必须是对象")
-            except (ValueError, TypeError) as exc:
-                raise _config_error(
-                    "gain.account",
-                    f"必须是合法的 JSON 对象（{exc}）",
-                    "<gain.account>",
-                ) from exc
+            account_data = _parse_gain_account(gain_account)
             gain_refresh_token = str(
-                account_data.get("RefreshToken")
-                or account_data.get("refreshToken")
-                or gain_refresh_token
+                account_data.get("refreshtoken") or gain_refresh_token
             )
             gain_device_id = str(
-                account_data.get("DeviceId")
-                or account_data.get("deviceId")
-                or gain_device_id
+                account_data.get("deviceid") or gain_device_id
             )
         # enabled 未显式配置时，检测到完整凭证即自动启用；
         # 显式设置（true/false）时以显式值为准

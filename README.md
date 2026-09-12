@@ -369,11 +369,13 @@ curl_config:
 | device_id | `GAIN_DEVICE_ID` | 空 | 与 RefreshToken 配对的 DeviceId |
 | account | `GAIN_ACCOUNT` | 空 | 上面两字段合并版：account.json 内容（JSON）一次粘贴 |
 
-**凭证获取：** 在手机端微信读书登录时抓包，查看 `https://i.weread.qq.com/login` 请求体，取其中的 `deviceId`（填入 `device_id`）和 `refreshToken`（填入 `refresh_token`）。`vid` 登录后自动获取，无需配置。也可以把这两个值组成一个 JSON 粘贴到 `GAIN_ACCOUNT` 一个环境变量里（**推荐，唯一必填项**；只需这两个字段，检测到即自动启用领奖）：
+**凭证获取：** 在手机端微信读书登录时抓包，查看 `https://i.weread.qq.com/login` 请求体，取其中的 `deviceId`（填入 `device_id`）和 `refreshToken`（填入 `refresh_token`）。也可以把这两个值组成一个键值对粘贴到 `GAIN_ACCOUNT` 一个环境变量里（**推荐，唯一必填项**；只需这两个字段，检测到即自动启用领奖）：
 
-```json
-{"RefreshToken": "抓包里的refreshToken", "DeviceId": "抓包里的deviceId"}
+```text
+RefreshToken=抓包里的refreshToken; DeviceId=抓包里的deviceId
 ```
+
+兼容 JSON 格式（`{"RefreshToken": "...", "DeviceId": "..."}`），键名大小写与下划线不敏感。
 
 **一份凭证驱动阅读与领奖：** 应用端与网页端共用 skey 凭证空间。启用 gain 后，程序每次运行会先登录应用端，把返回的 `skey` 派生为网页会话 Cookie（`wr_vid` + `wr_skey`）供本次阅读会话使用，并自动覆盖 CURL 中的旧 Cookie。因此 CURL 只需提供书籍位置信息（b/c 字段），其中的 Cookie 不再需要是有效会话——只要手机端凭证有效，阅读与领奖都无需再抓网页包。
 

@@ -173,6 +173,38 @@ class GainConfigParsingTests(unittest.TestCase):
         self.assertIn("gain.account", str(captured.exception))
         self.assertNotIn("not-json", str(captured.exception))
 
+    def test_gain_account_pair_format(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        with patch.dict(os.environ, {
+            "GAIN_ACCOUNT": "RefreshToken=rt-pair; DeviceId=dev-pair",
+        }):
+            config = self.bot.ConfigManager(path).config
+        self.assertEqual(config.gain.refresh_token, "rt-pair")
+        self.assertEqual(config.gain.device_id, "dev-pair")
+
+    def test_gain_account_pair_format_is_lenient(self):
+        # 大小写/下划线/空格/引号不敏感；值里允许带 base64 的 = 号
+        path = self._config_file("gain:\n  enabled: true\n")
+        raw = " refresh_token = 'abc==' ;  DEVICEID =\"dev\" ;; extra=1"
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": raw}):
+            config = self.bot.ConfigManager(path).config
+        self.assertEqual(config.gain.refresh_token, "abc==")
+        self.assertEqual(config.gain.device_id, "dev")
+
+    def test_gain_account_pair_without_separator_raises(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": "RefreshToken 没有等号"}):
+            with self.assertRaises(self.bot.ConfigError) as captured:
+                self.bot.ConfigManager(path)
+        self.assertIn("gain.account", str(captured.exception))
+
+    def test_gain_account_unrecognized_keys_raise(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": "foo=1; bar=2"}):
+            with self.assertRaises(self.bot.ConfigError) as captured:
+                self.bot.ConfigManager(path)
+        self.assertIn("gain.account", str(captured.exception))
+
     def test_gain_account_does_not_leak_secret_in_error(self):
         path = self._config_file("gain:\n  enabled: true\n")
         account = json.dumps({"RefreshToken": "rt-leak", "DeviceId": 123})
