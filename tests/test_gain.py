@@ -128,6 +128,35 @@ class GainConfigParsingTests(unittest.TestCase):
         self.assertEqual(config.gain.refresh_token, "rt-acct")
         self.assertEqual(config.gain.device_id, "dev-acct")
 
+    def test_gain_account_alone_auto_enables(self):
+        path = self._config_file("logging:\n  format: simple\n")
+        account = json.dumps({
+            "Vid": 42, "RefreshToken": "rt-acct", "DeviceId": "dev-acct",
+        })
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": account}):
+            config = self.bot.ConfigManager(path).config
+        self.assertTrue(config.gain.enabled)
+        self.assertEqual(config.gain.gain_type, 1)
+
+    def test_gain_credentials_in_yaml_auto_enable(self):
+        path = self._config_file(
+            "gain:\n  refresh_token: rt\n  device_id: dev\n"
+        )
+        config = self.bot.ConfigManager(path).config
+        self.assertTrue(config.gain.enabled)
+
+    def test_gain_account_with_explicit_false_stays_disabled(self):
+        path = self._config_file("gain:\n  enabled: false\n")
+        account = json.dumps({"RefreshToken": "rt", "DeviceId": "dev"})
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": account}):
+            config = self.bot.ConfigManager(path).config
+        self.assertFalse(config.gain.enabled)
+
+    def test_no_credentials_stays_disabled(self):
+        path = self._config_file("logging:\n  format: simple\n")
+        config = self.bot.ConfigManager(path).config
+        self.assertFalse(config.gain.enabled)
+
     def test_gain_account_env_accepts_camel_case(self):
         path = self._config_file("gain:\n  enabled: true\n")
         account = json.dumps({"refreshToken": "rt-camel", "deviceId": "dev-camel"})

@@ -469,10 +469,11 @@ class HackConfig:
 class GainConfig:
     """领奖配置（应用端每周阅读奖励兑换）
 
-    与网页端会话（wr_skey）相互独立：使用应用端 RefreshToken 登录
+    与网页端 Cookie 会话相互独立：使用应用端 RefreshToken 登录
     i.weread.qq.com 换取 AccessToken，再调用 /weekly/exchange
     查询并领取奖励。凭证通过手机端微信读书抓包 /login 请求获取。
     """
+    # enabled 未显式配置时自动判定：检测到完整凭证即启用
     enabled: bool = False
     # 奖励类型：1=无限卡，2=书币
     gain_type: int = 1
@@ -1221,10 +1222,19 @@ class ConfigManager:
                 or account_data.get("deviceId")
                 or gain_device_id
             )
+        # enabled 未显式配置时，检测到完整凭证即自动启用；
+        # 显式设置（true/false）时以显式值为准
+        gain_enabled_explicit = self._get_bool_or_none(
+            config_data, "gain.enabled", "GAIN_ENABLED"
+        )
+        if gain_enabled_explicit is not None:
+            gain_enabled = gain_enabled_explicit
+        else:
+            gain_enabled = bool(
+                gain_refresh_token.strip() and gain_device_id.strip()
+            )
         config.gain = GainConfig(
-            enabled=self._get_bool_config(
-                config_data, "gain.enabled", "GAIN_ENABLED", False
-            ),
+            enabled=gain_enabled,
             gain_type=self._get_config_value(
                 config_data, "gain.gain_type", "GAIN_TYPE", 1
             ),
@@ -5379,8 +5389,9 @@ async def _run_gain_only(config: WeReadConfig) -> int:
     """仅执行应用端每周奖励领取（--gain-only）。"""
     if not config.gain.enabled:
         logging.error(
-            "领奖未启用：请设置 gain.enabled=true 或环境变量 GAIN_ENABLED=true，"
-            "并提供 gain.refresh_token / gain.device_id"
+            "领奖未启用：请提供应用端凭证（环境变量 GAIN_ACCOUNT，"
+            "或 gain.refresh_token / gain.device_id）；"
+            "如需显式关闭可设置 GAIN_ENABLED=false"
         )
         return 1
 

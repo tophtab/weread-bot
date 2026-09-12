@@ -247,7 +247,9 @@ hack:
 # 启用后，每次运行还会用该凭证登录并派生网页会话 Cookie，
 # 自动覆盖 CURL 中的旧 Cookie——CURL 只需保留书籍位置信息即可。
 gain:
-  enabled: false              # 是否启用领奖（环境变量 GAIN_ENABLED）
+  # enabled 无需配置：检测到完整凭证（refresh_token+device_id，或
+  # 环境变量 GAIN_ACCOUNT）即自动启用；显式设置 false 可强制关闭
+  # enabled: true
   gain_type: 1                # 奖励类型：1=无限卡（默认），2=书币（环境变量 GAIN_TYPE）
   refresh_token: ""           # 应用端 RefreshToken（环境变量 GAIN_REFRESH_TOKEN）
   device_id: ""               # 与 RefreshToken 配对的 DeviceId（环境变量 GAIN_DEVICE_ID）
