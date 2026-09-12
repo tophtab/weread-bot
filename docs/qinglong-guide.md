@@ -71,6 +71,25 @@ apprise
 
 需要通知时，再添加本项目支持的通知变量，例如 `PUSHPLUS_TOKEN`；实际值只保存在面板中。通道字段见 [通知配置](../README.md#通知配置)。本项目使用自己的通知配置，不能仅凭青龙系统通知已配置就认为阅读结果也会推送。
 
+### 每周奖励领取（可选）
+
+如需自动兑换每周阅读时长奖励（无限卡/书币），再添加以下变量。凭证来自手机端微信读书抓包 `https://i.weread.qq.com/login` 请求体中的 `refreshToken` 和 `deviceId`，获取方式见 [每周奖励领取配置](../README.md#每周奖励领取配置gain)。
+
+| 名称 | 值 | 用途 |
+|------|----|------|
+| `GAIN_ENABLED` | `true` | 启用领奖 |
+| `GAIN_REFRESH_TOKEN` | 应用端 RefreshToken | 必填（启用领奖时） |
+| `GAIN_DEVICE_ID` | 与 RefreshToken 配对的 DeviceId | 必填（启用领奖时） |
+| `GAIN_TYPE` | `1` 或 `2` | 可选，`1`=无限卡（默认），`2`=书币 |
+
+启用后，每天阅读任务结束时自动查询并领取可领取的档位，领奖结果随通知推送；无需额外任务。如想把阅读与领奖拆成独立任务（例如阅读在 08:00、领奖在 21:00），则不设 `GAIN_ENABLED`，另建一条任务：
+
+```bash
+task funnyzak_weread-bot_main/weread-bot.py -- --gain-only
+```
+
+`--gain-only` 跳过 CURL 校验与阅读会话，仅执行领奖；此时同样需要上面四个 `GAIN_*` 环境变量（或改用 YAML 的 `gain:` 配置段并携带 `--config` 参数）。
+
 ## 多用户：共用阅读参数
 
 只创建 **一条** `WEREAD_CURL_STRING` 变量，**自动拆分选择否**。把多个账号的完整 cURL 依次粘贴到值中，每段之间至少留出 **两个空行**：
@@ -186,3 +205,4 @@ task -m 14400 funnyzak_weread-bot_main/weread-bot.py -- --mode immediate --confi
 | YAML 修改后看似没生效 | 检查同名全局环境变量及用户 `reading_overrides` 的覆盖关系 |
 | 任务长期运行或提前终止 | 确认使用 `immediate`，并按账号数检查超时和调度间隔 |
 | Cookie 刷新或认证失败 | 重新抓取对应账号完整请求，更新其环境变量或本地文件后重跑；分享日志前先脱敏 |
+| 领奖失败（-2013 鉴权失败） | `GAIN_REFRESH_TOKEN` / `GAIN_DEVICE_ID` 不匹配或已失效，重新在手机端抓包获取并更新变量 |

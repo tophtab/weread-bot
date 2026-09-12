@@ -238,6 +238,18 @@ hack:
   # 默认值：false，如果遇到cookie刷新失败的问题，可以尝试设置为true
   cookie_refresh_ql: false
 
+# 应用端每周奖励领取（阅读时长兑换无限卡/书币）
+# 与网页端 Cookie 会话相互独立，凭证来自手机端微信读书抓包：
+# 使用抓包工具查看 https://i.weread.qq.com/login 请求，取请求体中的
+# deviceId（DeviceId）和 refreshToken（RefreshToken）；vid 登录后自动获取。
+# 每次运行时在阅读会话结束后自动执行：查询可领取档位并全部领取，
+# 也可用 `python weread-bot.py --gain-only` 单独执行领奖。
+gain:
+  enabled: false              # 是否启用领奖（环境变量 GAIN_ENABLED）
+  gain_type: 1                # 奖励类型：1=无限卡（默认），2=书币（环境变量 GAIN_TYPE）
+  refresh_token: ""           # 应用端 RefreshToken（环境变量 GAIN_REFRESH_TOKEN）
+  device_id: ""               # 与 RefreshToken 配对的 DeviceId（环境变量 GAIN_DEVICE_ID）
+
 # 定时任务配置（仅在 startup_mode 为 scheduled 时生效）
 schedule:
   enabled: false   # 是否启用定时任务（true 时按 cron_expression 执行）

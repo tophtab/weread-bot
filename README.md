@@ -50,6 +50,7 @@ python weread-bot.py --show-last-run --config config.yaml
 ## 核心功能
 
 - ⏰ **智能延迟**：支持启动随机延迟，有效防止固定启动时间特征识别
+- 🎁 **每周奖励领取**：应用端凭证自动兑换阅读时长奖励（无限卡/书币），可与阅读会话联动或单独运行
 - 📚 **灵活阅读**：支持时长区间配置（如 30-90 分钟随机），模拟真实阅读习惯
 - 👥 **多用户支持**：支持多个微信读书账号执行，可配置最大并发数并为每个用户独立定制策略
 - 🎲 **多种阅读模式**：智能随机、顺序阅读、纯随机三种模式，满足不同使用场景
@@ -172,6 +173,9 @@ python weread-bot.py --dry-run --config config.yaml
 # 查看最近一次真实执行结果
 python weread-bot.py --show-last-run --config config.yaml
 
+# 仅执行应用端每周奖励领取，不进行阅读会话
+python weread-bot.py --gain-only --config config.yaml
+
 # 查看所有可用命令
 python weread-bot.py --help
 ```
@@ -181,6 +185,7 @@ python weread-bot.py --help
 - `--validate-config` 会输出用户数量、用户级 `CURL` 来源、时间策略覆盖情况和全局/用户配置差异摘要。
 - `--dry-run` 会在 `--validate-config` 的基础上继续输出通知触发配置、通道就绪状态、缺失字段和禁用通道摘要，但不会真正发起阅读请求。
 - `--show-last-run` 只读取 `history.file` 指向的本地历史文件，输出最近一次真实执行摘要后退出，不会初始化阅读会话。
+- `--gain-only` 跳过 CURL 校验与阅读会话，仅执行 `gain` 领奖流程；领奖结果同样通过通知通道推送。
 - 真实执行结束后，如 `history.enabled=true`，程序会把最近执行摘要写入默认文件 `logs/run-history.json`。
 - 历史记录只保存时间、状态、用户数、阅读统计和失败分类等摘要，不会保存 Cookie、请求头或原始 CURL。
 - 如果 `curl_config.users[].reading_overrides` 中存在不支持的键，程序会直接提示对应配置路径。
@@ -351,6 +356,39 @@ curl_config:
       file_path: "user1_curl.txt"
       cookie_refresh_ql: true  # 仅覆盖该用户
 ```
+
+### 每周奖励领取配置（gain）
+
+程序支持用应用端凭证自动兑换每周阅读时长奖励（无限卡或书币）。该功能与网页端 Cookie 会话相互独立：使用应用端 `RefreshToken` 登录 `i.weread.qq.com` 换取 `AccessToken`（无需第三方签名服务），再调用 `/weekly/exchange` 查询并领取 `awardStatus=1` 的档位。
+
+| 配置项 | 环境变量 | 默认值 | 说明 |
+|--------|----------|--------|------|
+| enabled | `GAIN_ENABLED` | `false` | 是否启用领奖 |
+| gain_type | `GAIN_TYPE` | `1` | 奖励类型：`1`=无限卡，`2`=书币 |
+| refresh_token | `GAIN_REFRESH_TOKEN` | 空 | 应用端 RefreshToken |
+| device_id | `GAIN_DEVICE_ID` | 空 | 与 RefreshToken 配对的 DeviceId |
+
+**凭证获取：** 在手机端微信读书登录时抓包，查看 `https://i.weread.qq.com/login` 请求体，取其中的 `deviceId`（填入 `device_id`）和 `refreshToken`（填入 `refresh_token`）。`vid` 登录后自动获取，无需配置。
+
+**运行方式：**
+- 启用后，每次阅读会话结束后自动执行领奖（每日运行时每天检查一次，有可领取档位即领取）
+- 或用 `python weread-bot.py --gain-only` 单独执行领奖，适合在青龙面板把阅读与领奖拆成两个定时任务
+- 领奖结果（领取成功/失败/无可领取档位）会通过通知通道推送，并计入执行历史
+
+**使用示例：**
+```yaml
+# config.yaml 示例
+gain:
+  enabled: true
+  gain_type: 1              # 领取无限卡
+  refresh_token: "你的RefreshToken"
+  device_id: "你的DeviceId"
+```
+
+**说明：**
+- `gain.enabled=true` 时必须同时提供 `refresh_token` 和 `device_id`，否则启动时直接报错退出
+- 领奖为账号级操作，多用户模式下每次运行也只执行一次
+- `RefreshToken` 与 `DeviceId` 等同于账号凭证，请勿泄露；日志中会自动脱敏
 
 ### 执行历史配置
 

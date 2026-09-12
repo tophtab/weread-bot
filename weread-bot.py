@@ -466,6 +466,23 @@ class HackConfig:
 
 
 @dataclass
+class GainConfig:
+    """领奖配置（应用端每周阅读奖励兑换）
+
+    与网页端会话（wr_skey）相互独立：使用应用端 RefreshToken 登录
+    i.weread.qq.com 换取 AccessToken，再调用 /weekly/exchange
+    查询并领取奖励。凭证通过手机端微信读书抓包 /login 请求获取。
+    """
+    enabled: bool = False
+    # 奖励类型：1=无限卡，2=书币
+    gain_type: int = 1
+    # 应用端凭证：RefreshToken（与 device_id 配对）
+    refresh_token: str = ""
+    # 应用端凭证：DeviceId（抓包 /login 请求体中的 deviceId）
+    device_id: str = ""
+
+
+@dataclass
 class WeReadConfig:
     """微信读书配置主类"""
     # App 基本配置
@@ -492,6 +509,7 @@ class WeReadConfig:
         default_factory=NotificationConfig
     )
     hack: HackConfig = field(default_factory=HackConfig)
+    gain: GainConfig = field(default_factory=GainConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -522,6 +540,7 @@ class WeReadConfig:
   🔄 阅读间隔: {self.reading.reading_interval} 秒
   🎭 人类模拟: {'启用' if self.human_simulation.enabled else '禁用'}
   👥 最大并发用户: {self.max_concurrent_users}
+  🎁 每周领奖: {'启用' if self.gain.enabled else '禁用'}
 
 网络配置:
   ⏱️  超时时间: {self.network.timeout} 秒
@@ -675,13 +694,15 @@ class RunResult:
     total_failed_reads: int = 0
     failure_categories: Dict[str, int] = field(default_factory=dict)
     continue_on_failure: bool = False
+    # 应用端领奖结果摘要（gain 启用时存在）
+    gain: Optional[Dict[str, Any]] = None
 
     @property
     def exit_code(self) -> int:
         return 0 if self.final_status == "success" else 1
 
     def to_summary_dict(self) -> Dict[str, Any]:
-        return {
+        summary = {
             "final_status": self.final_status,
             "user_count": self.user_count,
             "successful_users": self.successful_users,
@@ -694,6 +715,9 @@ class RunResult:
             "failure_categories": self.failure_categories.copy(),
             "continue_on_failure": self.continue_on_failure,
         }
+        if self.gain is not None:
+            summary["gain"] = dict(self.gain)
+        return summary
 
     @classmethod
     def from_session_results(
@@ -931,6 +955,28 @@ def validate_config_semantics(config: WeReadConfig) -> None:
     )
     parse_int(config.logging.backup_count, "logging.backup_count", 0)
     parse_int(config.history.max_entries, "history.max_entries", 1)
+    config.gain.gain_type = parse_int(
+        config.gain.gain_type, "gain.gain_type", 1
+    )
+    if config.gain.gain_type not in (1, 2):
+        raise _config_error(
+            "gain.gain_type",
+            "必须是 1（无限卡）或 2（书币）",
+            config.gain.gain_type,
+        )
+    if config.gain.enabled:
+        if not str(config.gain.refresh_token).strip():
+            raise _config_error(
+                "gain.refresh_token",
+                "gain.enabled 启用时必须提供应用端 RefreshToken",
+                "",
+            )
+        if not str(config.gain.device_id).strip():
+            raise _config_error(
+                "gain.device_id",
+                "gain.enabled 启用时必须提供应用端 DeviceId",
+                "",
+            )
 
     for index, user in enumerate(config.users):
         base = f"curl_config.users[{index}].reading_overrides"
@@ -1139,6 +1185,23 @@ class ConfigManager:
             cookie_refresh_ql=self._get_bool_config(
                 config_data, "hack.cookie_refresh_ql",
                 "HACK_COOKIE_REFRESH_QL", False
+            ),
+        )
+
+        # 加载领奖配置（应用端每周奖励）
+        config.gain = GainConfig(
+            enabled=self._get_bool_config(
+                config_data, "gain.enabled", "GAIN_ENABLED", False
+            ),
+            gain_type=self._get_config_value(
+                config_data, "gain.gain_type", "GAIN_TYPE", 1
+            ),
+            refresh_token=self._get_config_value(
+                config_data, "gain.refresh_token",
+                "GAIN_REFRESH_TOKEN", ""
+            ),
+            device_id=self._get_config_value(
+                config_data, "gain.device_id", "GAIN_DEVICE_ID", ""
             ),
         )
 
@@ -3161,6 +3224,7 @@ class WeReadApplication:
             result = await cls._run_multi_user_sessions(instance)
         else:
             result = await cls._run_single_user_session(instance)
+        await cls._run_gain_if_configured(instance, result)
         cls.set_run_summary(result.to_summary_dict())
         persist_run_history(
             instance.config,
@@ -3219,6 +3283,50 @@ class WeReadApplication:
                 )
             CURRENT_SESSION_ID.reset(session_token)
             CURRENT_USER.reset(user_token)
+
+    @classmethod
+    async def _run_gain_if_configured(
+        cls, instance: "WeReadApplication", result: RunResult
+    ) -> None:
+        """阅读会话结束后执行应用端领奖（如已启用）。
+
+        领奖为账号级操作（gain 配置只有一份），单用户与多用户模式下
+        均只执行一次；失败不影响阅读结果本身。
+        """
+        if not instance.config.gain.enabled:
+            return
+        if instance.is_shutdown_requested():
+            logging.info("📡 收到关闭信号，跳过领奖")
+            return
+
+        logging.info("🎁 开始执行应用端每周奖励领取")
+        gain_manager = GainManager(instance.config)
+        result.gain = await gain_manager.run()
+        await cls._notify_gain_result(instance.config, result.gain)
+
+    @staticmethod
+    async def _notify_gain_result(
+        config: WeReadConfig, gain_summary: Dict[str, Any]
+    ) -> None:
+        """领奖有结果（领取成功或失败）时发送通知。"""
+        status = gain_summary.get("status")
+        claimed = gain_summary.get("claimed") or []
+        if status == "failed":
+            message = f"🎁 领奖失败: {gain_summary.get('error')}"
+        elif claimed:
+            message = (
+                f"🎁 领奖完成: 已领取档位 {claimed} "
+                f"(类型 {gain_summary.get('gain_type')})"
+            )
+        else:
+            return
+        try:
+            notification_service = NotificationService(config.notification)
+            await notification_service.send_notification_async(
+                message, event=NotificationEvent.GENERAL
+            )
+        except Exception:
+            pass
 
     @classmethod
     async def _run_multi_user_sessions(cls, instance) -> RunResult:
@@ -4196,6 +4304,9 @@ def build_run_history_record(
         "continue_on_failure": run_summary.get("continue_on_failure", False),
     }
 
+    if run_summary.get("gain") is not None:
+        record["gain"] = run_summary["gain"]
+
     if runtime_error is not None:
         normalized_category = (
             error_category.value if isinstance(error_category, Enum)
@@ -4305,7 +4416,7 @@ def format_last_run_summary(last_record: Optional[Dict[str, Any]]) -> str:
         if failure_categories else "无"
     )
 
-    return "\n".join([
+    lines = [
         "最近执行记录",
         f"  记录时间: {last_record.get('recorded_at', '未知')}",
         f"  执行类型: {last_record.get('execution_type', 'unknown')}",
@@ -4331,7 +4442,225 @@ def format_last_run_summary(last_record: Optional[Dict[str, Any]]) -> str:
             if last_record.get("continue_on_failure", False)
             else "  失败后继续: 否"
         ),
-    ])
+    ]
+
+    gain_summary = last_record.get("gain")
+    if gain_summary:
+        claimed = gain_summary.get("claimed") or []
+        if gain_summary.get("status") == "failed":
+            lines.append(f"  🎁 领奖: 失败 ({gain_summary.get('error')})")
+        elif claimed:
+            lines.append(
+                f"  🎁 领奖: 已领取档位 {claimed} "
+                f"(类型 {gain_summary.get('gain_type')})"
+            )
+        else:
+            lines.append("  🎁 领奖: 无可领取档位")
+    return "\n".join(lines)
+
+
+# =========================
+# 应用端每周奖励领取（gain）
+# =========================
+
+GAIN_LOGIN_URL = "https://i.weread.qq.com/login"
+GAIN_EXCHANGE_URL = "https://i.weread.qq.com/weekly/exchange"
+GAIN_DEVICE_NAME = "微信阅读器(第二代)"
+GAIN_PF = "wechat_wx-2001-android-100-weread"
+GAIN_DEVICE_HEADERS = {
+    "User-Agent": (
+        "WeRead/1.9.3 WRBrand/null wr_eink Dalvik/2.1.0 "
+        "(Linux; U; Android 14)"
+    ),
+    "baseapi": "34",
+    "appver": "1.9.3.10244349",
+    "osver": "14",
+    "channelid": "990",
+    "basever": "1.9.3.10244349",
+}
+
+
+class GainManager:
+    """应用端每周阅读奖励领取管理器。
+
+    使用应用端 RefreshToken 登录换取 AccessToken（无需第三方签名
+    服务），随后调用 /weekly/exchange 查询并领取 awardStatus=1 的
+    奖励档位。凭证与网页端 Cookie 会话相互独立。
+    """
+
+    def __init__(self, config: WeReadConfig, http_client: Any = None):
+        self.config = config
+        self.gain_config = config.gain
+        self._injected_client = http_client
+
+    async def run(self) -> Dict[str, Any]:
+        """执行完整领奖流程，返回结果摘要（不含敏感信息）。"""
+        summary: Dict[str, Any] = {
+            "enabled": True,
+            "gain_type": self.gain_config.gain_type,
+            "status": "success",
+            "claimable": 0,
+            "claimed": [],
+            "error": "",
+        }
+        http_client = self._injected_client or HttpClient(self.config.network)
+        try:
+            accesstoken, vid = await self._login(http_client)
+            claimable = await self._query_claimable(
+                http_client, accesstoken, vid
+            )
+            summary["claimable"] = len(claimable)
+            if not claimable:
+                logging.info("🎁 领奖: 当前没有可领取的奖励档位")
+                return summary
+
+            gain_type = self.gain_config.gain_type
+            logging.info(
+                "🎁 领奖: 发现 %s 个可领取档位 %s，奖励类型=%s",
+                len(claimable),
+                claimable,
+                "无限卡" if gain_type == 1 else "书币",
+            )
+            for level_id in claimable:
+                if await self._claim(
+                    http_client, accesstoken, vid, level_id, gain_type
+                ):
+                    summary["claimed"].append(level_id)
+
+            if len(summary["claimed"]) == len(claimable):
+                summary["status"] = "success"
+            elif summary["claimed"]:
+                summary["status"] = "partial_success"
+            else:
+                summary["status"] = "failed"
+            return summary
+        except Exception as exc:
+            summary["status"] = "failed"
+            summary["error"] = format_error_message("领奖流程执行失败", exc)
+            logging.error(summary["error"])
+            return summary
+        finally:
+            await http_client.close()
+
+    async def _login(self, http_client: HttpClient) -> Tuple[str, int]:
+        """使用 RefreshToken 登录应用端，返回 (accesstoken, vid)。"""
+        login_body = {
+            "deviceId": self.gain_config.device_id,
+            "deviceName": GAIN_DEVICE_NAME,
+            "refreshToken": self.gain_config.refresh_token,
+            "inBackground": 0,
+            "kickType": 1,
+        }
+        data = await self._request_json(
+            http_client, GAIN_LOGIN_URL, GAIN_DEVICE_HEADERS, login_body
+        )
+        accesstoken = data.get("accessToken")
+        vid = data.get("vid")
+        if not accesstoken or vid is None:
+            raise RuntimeError(
+                f"应用端登录响应缺少凭证 (errcode={data.get('errcode')}, "
+                f"errmsg={data.get('errmsg')})"
+            )
+        logging.info(
+            "🎁 领奖: 应用端登录成功 (vid=%s, accesstoken=%s)",
+            vid,
+            _secret_marker(accesstoken),
+        )
+        return str(accesstoken), int(vid)
+
+    async def _query_claimable(
+        self, http_client: HttpClient, accesstoken: str, vid: int
+    ) -> List[int]:
+        """查询奖励档位，返回 awardStatus=1 的档位 ID 列表。"""
+        data = await self._exchange(
+            http_client, accesstoken, vid,
+            self._exchange_body(0, 0, exchange=False),
+        )
+        return [
+            award.get("awardLevelId")
+            for group in ("readtimeAwards", "readdayAwards", "readgoalAwards")
+            for award in (data.get(group) or [])
+            if award.get("awardStatus") == 1
+        ]
+
+    async def _claim(
+        self,
+        http_client: HttpClient,
+        accesstoken: str,
+        vid: int,
+        level_id: int,
+        gain_type: int,
+    ) -> bool:
+        """领取单个档位，返回是否成功。"""
+        data = await self._exchange(
+            http_client, accesstoken, vid,
+            self._exchange_body(level_id, gain_type, exchange=True),
+        )
+        errcode = data.get("errcode", 0)
+        if errcode:
+            logging.warning(
+                "🎁 领奖: 档位 %s 领取失败 errcode=%s errmsg=%s",
+                level_id, errcode, data.get("errmsg"),
+            )
+            return False
+        logging.info("🎁 领奖: 档位 %s 领取成功", level_id)
+        return True
+
+    async def _exchange(
+        self,
+        http_client: HttpClient,
+        accesstoken: str,
+        vid: int,
+        body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        headers = {
+            **GAIN_DEVICE_HEADERS,
+            "accesstoken": accesstoken,
+            "vid": str(vid),
+        }
+        return await self._request_json(
+            http_client, GAIN_EXCHANGE_URL, headers, body
+        )
+
+    async def _request_json(
+        self,
+        http_client: HttpClient,
+        url: str,
+        headers: Dict[str, str],
+        body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        try:
+            response, _ = await http_client.post_raw(
+                url, headers=headers, json_data=body
+            )
+        except Exception as exc:
+            detail = ""
+            response = getattr(exc, "response", None)
+            if response is not None:
+                try:
+                    detail = json.dumps(
+                        response.json(), ensure_ascii=False
+                    )[:200]
+                except Exception:
+                    detail = ""
+            raise RuntimeError(
+                f"领奖接口请求失败: {detail or exc}"
+            ) from exc
+        return response.json()
+
+    @staticmethod
+    def _exchange_body(
+        award_level_id: int, award_choice_type: int, exchange: bool
+    ) -> Dict[str, Any]:
+        """构造 /weekly/exchange 请求体（与 WereadCheckin 对齐）。"""
+        return {
+            "awardLevelId": award_level_id,
+            "awardChoiceType": award_choice_type,
+            "isExchangeAward": 1 if exchange else 0,
+            "isVisitReadGoal": 1,
+            "unread": 1,
+            "pf": GAIN_PF,
+        }
 
 
 # ======================
@@ -4823,6 +5152,12 @@ def parse_arguments(argv: Optional[List[str]] = None):
         help="显示最近一次真实执行结果并退出"
     )
 
+    parser.add_argument(
+        "--gain-only",
+        action="store_true",
+        help="仅执行应用端每周奖励领取（gain），不进行阅读会话"
+    )
+
     return parser.parse_args(argv)
 
 
@@ -4906,6 +5241,40 @@ async def _validate_curl_configs(config: WeReadConfig) -> None:
     logging.info("✅ 所有CURL配置验证通过")
 
 
+async def _run_gain_only(config: WeReadConfig) -> int:
+    """仅执行应用端每周奖励领取（--gain-only）。"""
+    if not config.gain.enabled:
+        logging.error(
+            "领奖未启用：请设置 gain.enabled=true 或环境变量 GAIN_ENABLED=true，"
+            "并提供 gain.refresh_token / gain.device_id"
+        )
+        return 1
+
+    logging.info("🎁 领奖专用模式：跳过阅读会话，仅执行每周奖励领取")
+    gain_summary = await GainManager(config).run()
+
+    claimed = gain_summary.get("claimed") or []
+    if gain_summary.get("status") == "failed":
+        message = f"🎁 领奖失败: {gain_summary.get('error')}"
+    elif claimed:
+        message = (
+            f"🎁 领奖完成: 已领取档位 {claimed} "
+            f"(类型 {gain_summary.get('gain_type')})"
+        )
+    else:
+        message = "🎁 领奖检查完成: 当前没有可领取的奖励档位"
+    logging.info(message)
+
+    try:
+        notification_service = NotificationService(config.notification)
+        await notification_service.send_notification_async(
+            message, event=NotificationEvent.GENERAL
+        )
+    except Exception:
+        pass
+    return 0 if gain_summary.get("status") != "failed" else 1
+
+
 async def main() -> int:
     """主函数"""
     # 解析命令行参数
@@ -4919,11 +5288,13 @@ async def main() -> int:
         execution_mode = "validate-config"
     elif args.show_last_run:
         execution_mode = "show-last-run"
+    elif args.gain_only:
+        execution_mode = "gain-only"
 
     required_deps = []
     if Path(args.config).exists() and yaml is None:
         required_deps.append("PyYAML")
-    if execution_mode == "normal":
+    if execution_mode in ("normal", "gain-only"):
         if requests is None:
             required_deps.append("requests")
         if httpx is None:
@@ -4958,6 +5329,11 @@ async def main() -> int:
         if args.mode:
             config.startup_mode = args.mode
             logging.info(f"🔧 命令行参数覆盖启动模式: {args.mode}")
+
+        # 领奖专用模式：跳过 CURL/用户校验与阅读会话
+        # gain 配置的语义校验已在 ConfigManager 加载时完成
+        if args.gain_only:
+            return await _run_gain_only(config)
 
         _validate_runtime_config(config)
 
