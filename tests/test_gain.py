@@ -118,6 +118,40 @@ class GainConfigParsingTests(unittest.TestCase):
             self.bot.ConfigManager(path)
         self.assertIn("gain.gain_type", str(captured.exception))
 
+    def test_gain_account_env_provides_credentials(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        account = json.dumps({
+            "Vid": 42, "RefreshToken": "rt-acct", "DeviceId": "dev-acct",
+        })
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": account}):
+            config = self.bot.ConfigManager(path).config
+        self.assertEqual(config.gain.refresh_token, "rt-acct")
+        self.assertEqual(config.gain.device_id, "dev-acct")
+
+    def test_gain_account_env_accepts_camel_case(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        account = json.dumps({"refreshToken": "rt-camel", "deviceId": "dev-camel"})
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": account}):
+            config = self.bot.ConfigManager(path).config
+        self.assertEqual(config.gain.refresh_token, "rt-camel")
+        self.assertEqual(config.gain.device_id, "dev-camel")
+
+    def test_gain_account_invalid_json_raises(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": "not-json"}):
+            with self.assertRaises(self.bot.ConfigError) as captured:
+                self.bot.ConfigManager(path)
+        self.assertIn("gain.account", str(captured.exception))
+        self.assertNotIn("not-json", str(captured.exception))
+
+    def test_gain_account_does_not_leak_secret_in_error(self):
+        path = self._config_file("gain:\n  enabled: true\n")
+        account = json.dumps({"RefreshToken": "rt-leak", "DeviceId": 123})
+        with patch.dict(os.environ, {"GAIN_ACCOUNT": account}):
+            config = self.bot.ConfigManager(path).config
+        self.assertEqual(config.gain.refresh_token, "rt-leak")
+        self.assertEqual(config.gain.device_id, "123")
+
 
 class GainManagerFlowTests(unittest.TestCase):
     def setUp(self):
@@ -256,6 +290,35 @@ class GainManagerFlowTests(unittest.TestCase):
         ])
         summary = asyncio.run(manager.run())
         self.assertNotIn("tok-secret", json.dumps(summary, ensure_ascii=False))
+
+    def test_run_with_credentials_skips_login(self):
+        manager, client = self._manager([
+            ({
+                "readtimeAwards": [{"awardLevelId": 2, "awardStatus": 1}],
+                "readdayAwards": [],
+                "readgoalAwards": [],
+            }, 200),
+            ({"succ": 1}, 200),
+        ])
+        summary = asyncio.run(manager.run(credentials=("tok-123", 42)))
+
+        self.assertEqual(summary["status"], "success")
+        self.assertEqual(summary["claimed"], [2])
+        self.assertEqual(client.requests[0]["url"].count("/weekly/exchange"), 1)
+        self.assertEqual(client.requests[0]["headers"]["accesstoken"], "tok-123")
+        self.assertTrue(
+            all("/login" not in r["url"] for r in client.requests)
+        )
+
+    def test_derive_web_cookies_returns_cookie_dict(self):
+        manager, client = self._manager([
+            ({"accessToken": "tok-123", "vid": 42}, 200),
+        ])
+        cookies = asyncio.run(manager.derive_web_cookies(client))
+        self.assertEqual(
+            cookies, {"wr_vid": "42", "wr_skey": "tok-123"}
+        )
+        self.assertEqual(client.requests[0]["url"], self.bot.GAIN_LOGIN_URL)
 
 
 class GainResultReportingTests(unittest.TestCase):

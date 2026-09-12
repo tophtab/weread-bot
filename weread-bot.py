@@ -1189,6 +1189,38 @@ class ConfigManager:
         )
 
         # 加载领奖配置（应用端每周奖励）
+        gain_refresh_token = self._get_config_value(
+            config_data, "gain.refresh_token", "GAIN_REFRESH_TOKEN", ""
+        )
+        gain_device_id = self._get_config_value(
+            config_data, "gain.device_id", "GAIN_DEVICE_ID", ""
+        )
+        # GAIN_ACCOUNT：单个环境变量提供整份凭证（JSON，与 WereadCheckin
+        # 的 account.json 同构），一次粘贴即可同时提供 RefreshToken 和 DeviceId
+        gain_account = self._get_config_value(
+            config_data, "gain.account", "GAIN_ACCOUNT", ""
+        )
+        if gain_account:
+            try:
+                account_data = json.loads(gain_account)
+                if not isinstance(account_data, dict):
+                    raise ValueError("根节点必须是对象")
+            except (ValueError, TypeError) as exc:
+                raise _config_error(
+                    "gain.account",
+                    f"必须是合法的 JSON 对象（{exc}）",
+                    "<gain.account>",
+                ) from exc
+            gain_refresh_token = str(
+                account_data.get("RefreshToken")
+                or account_data.get("refreshToken")
+                or gain_refresh_token
+            )
+            gain_device_id = str(
+                account_data.get("DeviceId")
+                or account_data.get("deviceId")
+                or gain_device_id
+            )
         config.gain = GainConfig(
             enabled=self._get_bool_config(
                 config_data, "gain.enabled", "GAIN_ENABLED", False
@@ -1196,13 +1228,8 @@ class ConfigManager:
             gain_type=self._get_config_value(
                 config_data, "gain.gain_type", "GAIN_TYPE", 1
             ),
-            refresh_token=self._get_config_value(
-                config_data, "gain.refresh_token",
-                "GAIN_REFRESH_TOKEN", ""
-            ),
-            device_id=self._get_config_value(
-                config_data, "gain.device_id", "GAIN_DEVICE_ID", ""
-            ),
+            refresh_token=gain_refresh_token,
+            device_id=gain_device_id,
         )
 
         # 加载调度配置
@@ -2987,6 +3014,8 @@ class WeReadApplication:
     _daily_session_count = 0
     _last_session_date = None
     _last_run_summary: Dict[str, Any] = {}
+    # 本次运行用应用端凭证派生的网页会话 Cookie（gain 启用时存在）
+    _derived_web_session: Optional[Dict[str, str]] = None
 
     def __init__(self, config: WeReadConfig, execution_type: str = "normal"):
         self.config = config
@@ -3018,6 +3047,16 @@ class WeReadApplication:
     def get_run_summary(cls) -> Dict[str, Any]:
         """获取最近一次运行摘要"""
         return cls._last_run_summary.copy()
+
+    @classmethod
+    def get_derived_web_session(cls) -> Optional[Dict[str, str]]:
+        """获取本次运行派生的网页会话 Cookie（未派生时为 None）"""
+        return cls._derived_web_session
+
+    @classmethod
+    def set_derived_web_session(cls, value: Optional[Dict[str, str]]):
+        """记录本次运行派生的网页会话 Cookie"""
+        cls._derived_web_session = value
 
     def _signal_handler(self, signum, frame):
         """信号处理器"""
@@ -3218,6 +3257,8 @@ class WeReadApplication:
             raise RuntimeError("应用程序实例未初始化")
 
         cls.reset_run_summary()
+        cls.set_derived_web_session(None)
+        await cls._derive_web_session_if_configured(instance)
 
         # 检查是否配置了多用户模式
         if instance.config.users:
@@ -3285,6 +3326,36 @@ class WeReadApplication:
             CURRENT_USER.reset(user_token)
 
     @classmethod
+    async def _derive_web_session_if_configured(cls, instance) -> None:
+        """gain 凭证可用时，登录应用端派生本次运行的网页会话 Cookie。
+
+        应用端与网页端共用 skey 凭证空间，因此每次运行用 RefreshToken
+        登录一次即可同时获得领奖凭证和网页阅读会话；CURL 中的 Cookie
+        会被派生值覆盖，不再要求其有效。仅当账号数不超过一个时派生
+        （真正的多账号场景下各账号应使用各自 CURL 中的 Cookie）。
+        """
+        if not instance.config.gain.enabled or len(instance.config.users) > 1:
+            return
+        if instance.is_shutdown_requested():
+            return
+
+        gain_manager = GainManager(instance.config)
+        try:
+            derived = await gain_manager.derive_web_cookies()
+        except Exception as exc:
+            logging.warning(
+                "🔑 应用端凭证派生网页会话失败，将沿用 CURL 中的 Cookie: %s",
+                exc,
+            )
+            return
+        cls.set_derived_web_session(derived)
+        logging.info(
+            "🔑 已用应用端凭证派生网页会话 (vid=%s, skey=%s)",
+            derived["wr_vid"],
+            _secret_marker(derived["wr_skey"]),
+        )
+
+    @classmethod
     async def _run_gain_if_configured(
         cls, instance: "WeReadApplication", result: RunResult
     ) -> None:
@@ -3301,7 +3372,11 @@ class WeReadApplication:
 
         logging.info("🎁 开始执行应用端每周奖励领取")
         gain_manager = GainManager(instance.config)
-        result.gain = await gain_manager.run()
+        derived = cls.get_derived_web_session()
+        credentials = None
+        if derived:
+            credentials = (derived["wr_skey"], int(derived["wr_vid"]))
+        result.gain = await gain_manager.run(credentials=credentials)
         await cls._notify_gain_result(instance.config, result.gain)
 
     @staticmethod
@@ -3537,6 +3612,29 @@ class WeReadSessionManager:
 
         self._load_curl_config()
         self._initialize_session_user_agent()
+        self._derived_session_active = False
+        self._apply_derived_web_session()
+
+    def _apply_derived_web_session(self) -> None:
+        """用应用端凭证派生的网页 Cookie 替换 CURL 中的整组 Cookie。
+
+        仅当账号数不超过一个时生效（多账号场景下各账号使用各自
+        CURL 中的 Cookie）；派生会话不存在时为无操作。
+
+        派生会话只包含 wr_vid/wr_skey：应用端登录返回的 skey 与网页端
+        共用凭证空间，阅读接口（/web/book/read 等）只需这两个 Cookie；
+        而 CURL 中的辅助 Cookie（wr_fp/wr_gid/wr_rt 等）与原会话绑定，
+        与派生 skey 混用会被服务端判为鉴权失败，因此整体替换。
+        """
+        derived = WeReadApplication.get_derived_web_session()
+        if not derived or len(self.config.users) > 1:
+            return
+        self.cookies = dict(derived)
+        self._derived_session_active = True
+        logging.info(
+            "🔑 阅读会话使用应用端凭证派生的网页 Cookie (vid=%s)",
+            derived.get("wr_vid"),
+        )
 
     def _resolve_cookie_refresh_ql(self) -> bool:
         """解析当前用户会话的 Cookie 刷新 ql 配置"""
@@ -3869,7 +3967,16 @@ class WeReadSessionManager:
                 )
                 return result
 
-            cookie_refreshed = await self._refresh_cookie()
+            if getattr(self, "_derived_session_active", False):
+                # 派生会话的 skey 在本次运行开始前刚由应用端登录签发，
+                # 有效期远大于单次运行时长，无需也不应主动续期
+                # （派生会话没有辅助 Cookie，续期接口无法使用）
+                logging.info(
+                    "🍪 使用应用端凭证派生的新鲜会话，跳过 Cookie 刷新"
+                )
+                cookie_refreshed = True
+            else:
+                cookie_refreshed = await self._refresh_cookie()
             refresh_duration()
             if is_cancelled():
                 result = SessionResult(
@@ -4493,8 +4600,14 @@ class GainManager:
         self.gain_config = config.gain
         self._injected_client = http_client
 
-    async def run(self) -> Dict[str, Any]:
-        """执行完整领奖流程，返回结果摘要（不含敏感信息）。"""
+    async def run(
+        self, credentials: Optional[Tuple[str, int]] = None
+    ) -> Dict[str, Any]:
+        """执行完整领奖流程，返回结果摘要（不含敏感信息）。
+
+        credentials: 可选的 (accesstoken, vid)；传入时跳过登录，
+        用于复用本次运行已派生的应用端会话。
+        """
         summary: Dict[str, Any] = {
             "enabled": True,
             "gain_type": self.gain_config.gain_type,
@@ -4505,7 +4618,10 @@ class GainManager:
         }
         http_client = self._injected_client or HttpClient(self.config.network)
         try:
-            accesstoken, vid = await self._login(http_client)
+            if credentials:
+                accesstoken, vid = credentials
+            else:
+                accesstoken, vid = await self.login(http_client)
             claimable = await self._query_claimable(
                 http_client, accesstoken, vid
             )
@@ -4542,8 +4658,13 @@ class GainManager:
         finally:
             await http_client.close()
 
-    async def _login(self, http_client: HttpClient) -> Tuple[str, int]:
-        """使用 RefreshToken 登录应用端，返回 (accesstoken, vid)。"""
+    async def login(self, http_client: HttpClient) -> Tuple[str, int]:
+        """使用 RefreshToken 登录应用端，返回 (accesstoken, vid)。
+
+        返回的 accesstoken 同时可作为网页端 wr_skey 使用（应用端与
+        网页端共用 skey 凭证空间），因此同一份凭证既能领奖也能派生
+        网页阅读会话。
+        """
         login_body = {
             "deviceId": self.gain_config.device_id,
             "deviceName": GAIN_DEVICE_NAME,
@@ -4567,6 +4688,19 @@ class GainManager:
             _secret_marker(accesstoken),
         )
         return str(accesstoken), int(vid)
+
+    async def derive_web_cookies(
+        self, http_client: Optional[HttpClient] = None
+    ) -> Dict[str, str]:
+        """登录应用端并派生网页会话 Cookie（wr_vid/wr_skey）。"""
+        own_client = http_client is None
+        client = http_client or HttpClient(self.config.network)
+        try:
+            accesstoken, vid = await self.login(client)
+        finally:
+            if own_client:
+                await client.close()
+        return {"wr_vid": str(vid), "wr_skey": accesstoken}
 
     async def _query_claimable(
         self, http_client: HttpClient, accesstoken: str, vid: int

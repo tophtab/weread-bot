@@ -367,8 +367,11 @@ curl_config:
 | gain_type | `GAIN_TYPE` | `1` | 奖励类型：`1`=无限卡，`2`=书币 |
 | refresh_token | `GAIN_REFRESH_TOKEN` | 空 | 应用端 RefreshToken |
 | device_id | `GAIN_DEVICE_ID` | 空 | 与 RefreshToken 配对的 DeviceId |
+| account | `GAIN_ACCOUNT` | 空 | 上面两字段合并版：account.json 内容（JSON）一次粘贴 |
 
-**凭证获取：** 在手机端微信读书登录时抓包，查看 `https://i.weread.qq.com/login` 请求体，取其中的 `deviceId`（填入 `device_id`）和 `refreshToken`（填入 `refresh_token`）。`vid` 登录后自动获取，无需配置。
+**凭证获取：** 在手机端微信读书登录时抓包，查看 `https://i.weread.qq.com/login` 请求体，取其中的 `deviceId`（填入 `device_id`）和 `refreshToken`（填入 `refresh_token`）。`vid` 登录后自动获取，无需配置。也可以直接把抓包得到的 `account.json` 内容原样粘贴到 `GAIN_ACCOUNT` 一个环境变量里。
+
+**一份凭证驱动阅读与领奖：** 应用端与网页端共用 skey 凭证空间。启用 gain 后，程序每次运行会先登录应用端，把返回的 `skey` 派生为网页会话 Cookie（`wr_vid` + `wr_skey`）供本次阅读会话使用，并自动覆盖 CURL 中的旧 Cookie。因此 CURL 只需提供书籍位置信息（b/c 字段），其中的 Cookie 不再需要是有效会话——只要手机端凭证有效，阅读与领奖都无需再抓网页包。
 
 **运行方式：**
 - 启用后，每次阅读会话结束后自动执行领奖（每日运行时每天检查一次，有可领取档位即领取）
@@ -386,8 +389,8 @@ gain:
 ```
 
 **说明：**
-- `gain.enabled=true` 时必须同时提供 `refresh_token` 和 `device_id`，否则启动时直接报错退出
-- 领奖为账号级操作，多用户模式下每次运行也只执行一次
+- `gain.enabled=true` 时必须同时提供 `refresh_token` 和 `device_id`（或等价的 `GAIN_ACCOUNT`），否则启动时直接报错退出
+- 领奖为账号级操作，多用户模式下每次运行也只执行一次；网页 Cookie 自动派生仅作用于单用户模式
 - `RefreshToken` 与 `DeviceId` 等同于账号凭证，请勿泄露；日志中会自动脱敏
 
 ### 执行历史配置

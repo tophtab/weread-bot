@@ -78,17 +78,20 @@ apprise
 | 名称 | 值 | 用途 |
 |------|----|------|
 | `GAIN_ENABLED` | `true` | 启用领奖 |
-| `GAIN_REFRESH_TOKEN` | 应用端 RefreshToken | 必填（启用领奖时） |
-| `GAIN_DEVICE_ID` | 与 RefreshToken 配对的 DeviceId | 必填（启用领奖时） |
+| `GAIN_ACCOUNT` | `{"Vid":123,"RefreshToken":"...","DeviceId":"..."}` | 必填（启用领奖时），即抓包得到的 account.json 内容原样粘贴 |
 | `GAIN_TYPE` | `1` 或 `2` | 可选，`1`=无限卡（默认），`2`=书币 |
 
-启用后，每天阅读任务结束时自动查询并领取可领取的档位，领奖结果随通知推送；无需额外任务。如想把阅读与领奖拆成独立任务（例如阅读在 08:00、领奖在 21:00），则不设 `GAIN_ENABLED`，另建一条任务：
+启用后，每次阅读任务结束时自动查询并领取可领取的档位，领奖结果随通知推送；无需额外任务。
+
+此外，启用领奖后程序每次运行会先用应用端凭证登录，把返回的 skey 派生为网页会话 Cookie 供阅读使用（自动覆盖 `WEREAD_CURL_STRING` 中的 Cookie）。因此 CURL 里的 Cookie 不再需要是有效会话，只要手机端凭证有效，阅读与领奖都无需重新抓网页包。
+
+如想把阅读与领奖拆成独立任务（例如阅读在 08:00、领奖在 21:00），则不设 `GAIN_ENABLED`，另建一条任务：
 
 ```bash
 task funnyzak_weread-bot_main/weread-bot.py -- --gain-only
 ```
 
-`--gain-only` 跳过 CURL 校验与阅读会话，仅执行领奖；此时同样需要上面四个 `GAIN_*` 环境变量（或改用 YAML 的 `gain:` 配置段并携带 `--config` 参数）。
+`--gain-only` 跳过 CURL 校验与阅读会话，仅执行领奖；此时同样需要上面的 `GAIN_*` 环境变量（或改用 YAML 的 `gain:` 配置段并携带 `--config` 参数）。
 
 ## 多用户：共用阅读参数
 
